@@ -1,0 +1,2879 @@
+import discord
+from discord import app_commands
+import os
+import sqlite3
+import time
+from datetime import datetime
+
+
+TOKEN = os.getenv("TOKEN")
+VERSION = "V2.0.5"
+
+OWNER_ID = 615461551838593024
+HUB_SERVER_ID = 1529775908523741264
+GLOBAL_LOG_CHANNEL_ID = 1529981355293671534
+
+start_time = time.time()
+
+
+# ================= INTENTS =================
+
+intents = discord.Intents.default()
+intents.members = True
+
+
+
+# ================= DATABASE =================
+
+
+def db():
+    return sqlite3.connect("defender.db")
+
+
+
+def setup_database():
+
+    conn = db()
+    cur = conn.cursor()
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS global_bans (
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        user_id TEXT UNIQUE,
+
+        reason TEXT,
+
+        banned_by TEXT,
+
+        date TEXT
+    )
+    """)
+
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS servers (
+
+        server_id TEXT PRIMARY KEY,
+
+        name TEXT
+    )
+    """)
+
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS admins (
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        user_id TEXT,
+
+        role_id TEXT,
+
+        permission TEXT
+    )
+    """)
+
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS logs (
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        user_id TEXT,
+
+        action TEXT,
+
+        reason TEXT,
+
+        moderator TEXT,
+
+        guild TEXT,
+
+        date TEXT
+    )
+    """)
+
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS log_channels (
+
+        guild_id TEXT PRIMARY KEY,
+
+        channel_id TEXT
+    )
+    """)
+
+    # ================= CASE NOTES =================
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS case_notes (
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    case_id INTEGER,
+
+    author TEXT,
+
+    note TEXT,
+
+    date TEXT
+
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+
+
+
+# ================= PERMISSION LEVEL SYSTEM =================
+
+
+PERMISSION_LEVELS = {
+    "manager": 4,
+    "superadmin": 3,
+    "admin": 2,
+    "mod": 1
+}
+
+
+def get_permission_level(member):
+
+    permission = get_permission(member)
+
+    return PERMISSION_LEVELS.get(permission, 0)
+
+
+def can_mod(member):
+
+    return get_permission_level(member) >= PERMISSION_LEVELS["mod"]
+
+
+def can_admin(member):
+
+    return get_permission_level(member) >= PERMISSION_LEVELS["admin"]
+
+
+def can_superadmin(member):
+
+    return get_permission_level(member) >= PERMISSION_LEVELS["superadmin"]
+
+
+def can_manager(member):
+
+    return get_permission_level(member) >= PERMISSION_LEVELS["manager"]
+
+
+
+def get_permission(member):
+
+
+    # Permanent Defender Manager
+
+    if member.id == OWNER_ID:
+
+        return "manager"
+
+
+
+    permissions = []
+
+
+
+    conn = db()
+
+    cur = conn.cursor()
+
+
+
+    # Check direct user permissions
+
+    cur.execute(
+        """
+        SELECT permission
+        FROM admins
+        WHERE user_id=?
+        """,
+        (str(member.id),)
+    )
+
+
+    results = cur.fetchall()
+
+
+
+    for result in results:
+
+        permissions.append(
+            result[0]
+        )
+
+
+
+    # Check ALL role permissions
+
+    for role in member.roles:
+
+
+        cur.execute(
+            """
+            SELECT permission
+            FROM admins
+            WHERE role_id=?
+            """,
+            (str(role.id),)
+        )
+
+
+        results = cur.fetchall()
+
+
+
+        for result in results:
+
+            permissions.append(
+                result[0]
+            )
+
+
+
+    conn.close()
+
+
+
+    # No Defender permissions
+
+    if not permissions:
+
+        return None
+
+
+
+    # Return highest permission
+
+    highest = None
+
+    highest_level = 0
+
+
+
+    for permission in permissions:
+
+
+        level = PERMISSION_LEVELS.get(
+            permission,
+            0
+        )
+
+
+        if level > highest_level:
+
+            highest_level = level
+
+            highest = permission
+
+
+
+    return highest
+
+# ================= MODERATION DM =================
+
+async def send_mod_dm(
+    user_id,
+    action,
+    reason,
+    case_id,
+    guild=None,
+    global_action=False
+):
+
+    try:
+
+        user = await client.fetch_user(
+            int(user_id)
+        )
+
+        embed = discord.Embed(
+            title="🌐 Defender Network Notice" if global_action else "🛡️ Defender Moderation Notice",
+            colour=discord.Colour.red()
+        )
+
+        # Summary
+        if global_action:
+
+            embed.description = (
+                "You have been **globally banned** across all **416-related servers** "
+                "protected by Defender. The reason for this action is provided below."
+            )
+
+        else:
+
+            if action == "Kick":
+
+                embed.description = (
+                    f"You have been **kicked** from **{guild.name if guild else 'this server'}**. "
+                    "The reason for this action is provided below."
+                )
+
+            elif action == "Ban":
+
+                embed.description = (
+                    f"You have been **banned** from **{guild.name if guild else 'this server'}**. "
+                    "The reason for this action is provided below."
+                )
+
+            else:
+
+                embed.description = (
+                    f"A moderation action has been taken against you in "
+                    f"**{guild.name if guild else 'this server'}**."
+                )
+
+        if global_action:
+
+            embed.add_field(
+                name="Action",
+                value=action,
+                inline=False
+            )
+
+        else:
+
+            embed.add_field(
+                name="Server",
+                value=guild.name if guild else "Unknown",
+                inline=False
+            )
+
+            embed.add_field(
+                name="Action",
+                value=action,
+                inline=True
+            )
+
+        embed.add_field(
+            name="Reason",
+            value=reason,
+            inline=False
+        )
+
+        embed.add_field(
+            name="Case ID",
+            value=f"#{case_id}",
+            inline=True
+        )
+
+        # Appeal information (Ban / Global Ban only)
+        if action in ["Ban", "Global Ban"]:
+
+            embed.set_footer(
+                text="If you believe this was a mistake, please appeal at discord.gg/9trYue97N4"
+            )
+
+        await user.send(
+            embed=embed
+        )
+
+    except discord.Forbidden:
+
+        print(
+            f"⚠️ Could not DM user {user_id} (DMs disabled)"
+        )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Failed to send moderation DM: {e}"
+        )
+
+# ================= BAN PROTECTION =================
+
+def ban_protection(
+    guild,
+    user_id
+):
+
+    user_id = int(user_id)
+
+    # Protect Defender Manager
+    if user_id == OWNER_ID:
+
+        return False, "User is the Defender Manager."
+
+    # Protect Defender staff assigned directly by user ID
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT permission
+        FROM admins
+        WHERE user_id=?
+        """,
+        (str(user_id),)
+    )
+
+    result = cur.fetchone()
+
+    conn.close()
+
+    if result:
+
+        permission = result[0]
+
+        return False, f"User is a Defender {permission}."
+
+    # Check if the user is in this server
+    member = guild.get_member(user_id)
+
+    if member is None:
+
+        return True, None
+
+    # Protect server owner
+    if member.id == guild.owner_id:
+
+        return False, "User is the server owner."
+
+    # Protect Discord administrators
+    if member.guild_permissions.administrator:
+
+        return False, "User has Discord Administrator permissions."
+
+    # Protect Defender staff via roles
+    permission = get_permission(member)
+
+    if permission:
+
+        return False, f"User is a Defender {permission}."
+
+    return True, None
+
+# ================= LOGGING =================
+
+async def add_log(
+    guild,
+    user_id,
+    action,
+    reason,
+    moderator
+):
+
+    print("ADD_LOG TRIGGERED:", action)
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO logs
+        (
+        user_id,
+        action,
+        reason,
+        moderator,
+        guild,
+        date
+        )
+        VALUES (?,?,?,?,?,?)
+        """,
+        (
+            str(user_id),
+            action,
+            reason,
+            str(moderator),
+            guild.name if guild else "Global",
+            datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        )
+    )
+
+    case_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    # ================= LOCAL SERVER LOG =================
+
+    channel = None
+
+    if guild is not None:
+
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT channel_id
+            FROM log_channels
+            WHERE guild_id=?
+            """,
+            (str(guild.id),)
+        )
+
+        result = cur.fetchone()
+
+        conn.close()
+
+        if result:
+
+            channel = guild.get_channel(
+                int(result[0])
+            )
+
+    embed = discord.Embed(
+        title=f"🛡️ Defender | {action}",
+        colour=discord.Colour.red(),
+        timestamp=datetime.now()
+    )
+
+    embed.add_field(
+        name="Case ID",
+        value=f"#{case_id}",
+        inline=True
+    )
+
+    embed.add_field(
+        name="User",
+        value=f"<@{user_id}> (`{user_id}`)",
+        inline=False
+    )
+
+    embed.add_field(
+        name="Moderator",
+        value=f"<@{moderator}>",
+        inline=True
+    )
+
+    embed.add_field(
+        name="Reason",
+        value=reason,
+        inline=False
+    )
+
+    embed.add_field(
+        name="Server",
+        value=guild.name if guild else "Global",
+        inline=True
+    )
+
+    if channel:
+
+        await channel.send(
+            embed=embed
+        )
+
+    # ================= HUB GLOBAL LOG =================
+
+    # Only send external logs for branch servers
+    if guild and guild.id != HUB_SERVER_ID:
+
+        hub = client.get_guild(HUB_SERVER_ID)
+
+        if hub:
+
+            global_channel = hub.get_channel(
+                GLOBAL_LOG_CHANNEL_ID
+            )
+
+
+            if global_channel:
+
+                global_embed = discord.Embed(
+                    title=f"🌐 Defender Network | {action}",
+                    colour=discord.Colour.red(),
+                    timestamp=datetime.now()
+                )
+
+
+                global_embed.add_field(
+                    name="Case ID",
+                    value=f"#{case_id}",
+                    inline=True
+                )
+
+
+                global_embed.add_field(
+                    name="User",
+                    value=f"<@{user_id}> (`{user_id}`)",
+                    inline=False
+                )
+
+
+                global_embed.add_field(
+                    name="Moderator",
+                    value=f"<@{moderator}>",
+                    inline=True
+                )
+
+
+                global_embed.add_field(
+                    name="Server",
+                    value=guild.name,
+                    inline=True
+                )
+
+
+                global_embed.add_field(
+                    name="Reason",
+                    value=reason[:1024],
+                    inline=False
+                )
+
+
+                await global_channel.send(
+                    embed=global_embed
+                )
+
+
+    return case_id
+    
+# ================= CLIENT =================
+
+
+
+class Defender(discord.Client):
+
+
+    def __init__(self):
+
+        super().__init__(
+            intents=intents
+        )
+
+
+        self.tree = app_commands.CommandTree(
+            self
+        )
+
+
+
+
+client = Defender()
+
+
+
+
+
+async def update_status():
+
+    conn = db()
+
+    cur = conn.cursor()
+
+
+
+    cur.execute(
+        "SELECT COUNT(*) FROM servers"
+    )
+
+
+    amount = cur.fetchone()[0]
+
+
+    conn.close()
+
+
+
+    await client.change_presence(
+
+        activity=discord.Game(
+
+            name=f"🛡️ Defending {amount} servers..."
+
+        )
+
+    )
+
+
+
+
+
+
+@client.event
+async def on_ready():
+
+    print(f"🛡️ Defender {VERSION}")
+
+    print("🗄️ Loading database...")
+    setup_database()
+    print("✅ Database loaded")
+
+    print("🔄 Syncing commands...")
+    await client.tree.sync()
+    print("✅ Commands synced")
+
+    print("📡 Updating presence...")
+    await update_status()
+    print("✅ Presence updated")
+
+    print(f"🌐 Connected to {len(client.guilds)} server{'s' if len(client.guilds) != 1 else ''}")
+
+    print("📋 Server List:")
+    for guild in sorted(client.guilds, key=lambda g: g.name.lower()):
+        print(f"   • {guild.name} ({guild.id})")
+
+    print(f"🛡️ Defender is online as {client.user}")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+# ================= ABOUT =================
+
+
+def format_uptime(seconds):
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+
+    return f"{hours}h {minutes}m {seconds}s"
+
+
+
+@client.tree.command(
+    name="about",
+    description="Show Defender information"
+)
+async def about(interaction):
+
+    uptime = format_uptime(
+        int(time.time() - start_time)
+    )
+
+
+    latency = round(
+        client.latency * 1000
+    )
+
+
+    embed = discord.Embed(
+
+        title="🛡️ Defender",
+
+        description="416 Defender - Private Cross Moderation Application",
+
+        colour=discord.Colour.green()
+
+    )
+
+
+    embed.add_field(
+
+        name="Status",
+
+        value="🟢 Online",
+
+        inline=True
+
+    )
+
+
+    embed.add_field(
+
+        name="Latency",
+
+        value=f"📡 {latency}ms",
+
+        inline=True
+
+    )
+
+
+    embed.add_field(
+
+        name="Uptime",
+
+        value=f"⏱️ {uptime}",
+
+        inline=True
+
+    )
+
+
+    embed.add_field(
+
+        name="Servers Protected",
+
+        value=f"🌐 {len(client.guilds)}",
+
+        inline=True
+
+    )
+
+
+    embed.add_field(
+
+        name="Version",
+
+        value=f"📦 {VERSION}",
+
+        inline=True
+
+    )
+
+
+    embed.set_footer(
+
+        text="Defender Network"
+
+    )
+
+
+    await interaction.response.send_message(
+
+        embed=embed
+
+    )
+
+
+# ================= LOG CHANNEL =================
+
+
+@client.tree.command(
+    name="setlogchannel",
+    description="Set Defender logging channel"
+)
+@app_commands.describe(
+    channel="Channel to send Defender logs"
+)
+async def setlogchannel(
+    interaction,
+    channel: discord.TextChannel
+):
+
+    if not can_admin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO log_channels
+
+        VALUES (?,?)
+
+        """,
+
+        (
+            str(interaction.guild.id),
+            str(channel.id)
+        )
+    )
+
+
+    conn.commit()
+    conn.close()
+
+
+
+    await interaction.response.send_message(
+        f"✅ Defender logs will now go to {channel.mention}"
+    )
+
+
+
+    case_id = await add_log(
+        interaction.guild,
+        interaction.user.id,
+        "LOG CHANNEL SET",
+        f"Logging channel changed to {channel.mention}",
+        interaction.user.id
+    )
+
+
+
+
+
+
+# ================= SERVER MANAGEMENT =================
+
+
+@client.tree.command(
+    name="addserver",
+    description="Register this server with Defender"
+)
+async def addserver(interaction: discord.Interaction):
+
+    if not can_superadmin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ Superadmin permission required.",
+            ephemeral=True
+        )
+
+        return
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+    # Check if already registered
+    cur.execute(
+        """
+        SELECT server_id
+        FROM servers
+        WHERE server_id=?
+        """,
+        (str(interaction.guild.id),)
+    )
+
+    if cur.fetchone():
+
+        conn.close()
+
+        await interaction.response.send_message(
+            "❌ This server is already registered with Defender.",
+            ephemeral=True
+        )
+
+        return
+
+
+    # Register server
+    cur.execute(
+        """
+        INSERT INTO servers
+        VALUES (?,?)
+        """,
+        (
+            str(interaction.guild.id),
+            interaction.guild.name
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    await update_status()
+
+    await add_log(
+        interaction.guild,
+        interaction.user.id,
+        "SERVER ADDED",
+        "Server registered with Defender",
+        interaction.user.id
+    )
+
+    await interaction.response.send_message(
+        f"✅ **{interaction.guild.name}** has been registered with Defender."
+    )
+
+
+
+
+@client.tree.command(
+    name="removeserver",
+    description="Remove this server from Defender"
+)
+async def removeserver(interaction: discord.Interaction):
+
+    if not can_superadmin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ Superadmin permission required.",
+            ephemeral=True
+        )
+
+        return
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+    # Check if registered
+    cur.execute(
+        """
+        SELECT server_id
+        FROM servers
+        WHERE server_id=?
+        """,
+        (str(interaction.guild.id),)
+    )
+
+    if not cur.fetchone():
+
+        conn.close()
+
+        await interaction.response.send_message(
+            "❌ This server is not registered with Defender.",
+            ephemeral=True
+        )
+
+        return
+
+
+    # Remove server
+    cur.execute(
+        """
+        DELETE FROM servers
+        WHERE server_id=?
+        """,
+        (str(interaction.guild.id),)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await update_status()
+
+    await add_log(
+        interaction.guild,
+        interaction.user.id,
+        "SERVER REMOVED",
+        "Server removed from Defender",
+        interaction.user.id
+    )
+
+    await interaction.response.send_message(
+        f"✅ **{interaction.guild.name}** has been removed from Defender."
+    )
+
+
+
+
+@client.tree.command(
+    name="serverlist",
+    description="View Defender servers"
+)
+async def serverlist(interaction):
+
+    if not can_admin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission.",
+            ephemeral=True
+        )
+
+        return
+
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT name, server_id
+        FROM servers
+        """
+    )
+
+    servers = cur.fetchall()
+
+    conn.close()
+
+    if not servers:
+
+        await interaction.response.send_message(
+            "No registered servers."
+        )
+
+        return
+
+    embed = discord.Embed(
+        title="🛡️ Defender Servers",
+        colour=discord.Colour.blue()
+    )
+
+    embed.description = "\n".join(
+        [
+            f"**{name}**\n`{sid}`"
+            for name, sid in servers
+        ]
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# ================= USER LOG VIEWER =================
+
+@client.tree.command(
+    name="logs",
+    description="View Defender logs for a user"
+)
+@app_commands.describe(
+    user_id="Discord User ID"
+)
+async def logs(
+    interaction,
+    user_id: str
+):
+
+    if not can_mod(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+        action,
+        reason,
+        moderator,
+        guild,
+        date
+
+        FROM logs
+
+        WHERE user_id=?
+
+        ORDER BY id DESC
+
+        LIMIT 10
+        """,
+        (user_id,)
+    )
+
+    entries = cur.fetchall()
+
+    conn.close()
+
+    if not entries:
+
+        await interaction.response.send_message(
+            "❌ No logs found."
+        )
+
+        return
+
+    embed = discord.Embed(
+        title="📜 Defender Logs",
+        description=f"User: <@{user_id}>",
+        colour=discord.Colour.orange()
+    )
+
+    for action, reason, moderator, guild, date in entries:
+
+        embed.add_field(
+            name=action,
+            value=(
+                f"**Reason:** {reason}\n"
+                f"**Moderator:** <@{moderator}>\n"
+                f"**Server:** {guild}\n"
+                f"**Date:** {date}"
+            ),
+            inline=False
+        )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+# ================= GLOBAL BAN CONFIRMATION =================
+
+
+class ConfirmGlobalBan(discord.ui.View):
+
+    def __init__(self, original_user, user_id, reason):
+
+        super().__init__(timeout=60)
+
+        self.original_user = original_user
+        self.user_id = user_id
+        self.reason = reason
+
+
+
+    @discord.ui.button(
+        label="Confirm",
+        style=discord.ButtonStyle.danger,
+        emoji="🔨"
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+
+        # Only the person who ran /gban can confirm
+
+        if interaction.user.id != self.original_user.id:
+
+            await interaction.response.send_message(
+                "❌ Only the moderator who started this ban can confirm it.",
+                ephemeral=True
+            )
+
+            return
+
+
+
+        # Check if already banned
+
+        conn = db()
+        cur = conn.cursor()
+
+
+        cur.execute(
+            """
+            SELECT reason
+            FROM global_bans
+            WHERE user_id=?
+            """,
+            (self.user_id,)
+        )
+
+
+        existing = cur.fetchone()
+
+
+        if existing:
+
+            conn.close()
+
+            await interaction.response.edit_message(
+                content=f"❌ User is already globally banned.\nReason: {existing[0]}",
+                embed=None,
+                view=None
+            )
+
+            return
+
+
+
+        # Add global ban
+
+        cur.execute(
+            """
+            INSERT INTO global_bans
+            (
+            user_id,
+            reason,
+            banned_by,
+            date
+            )
+            VALUES (?,?,?,?)
+            """,
+            (
+                self.user_id,
+                self.reason,
+                str(interaction.user.id),
+                datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            )
+        )
+
+
+        conn.commit()
+        conn.close()
+
+
+
+        # Add log
+
+        case_id = await add_log(
+            interaction.guild,
+            self.user_id,
+            "GLOBAL BAN",
+            self.reason,
+            interaction.user.id
+        )
+
+
+
+        # Send global ban DM
+
+        await send_mod_dm(
+            self.user_id,
+            "Global Ban",
+            self.reason,
+            case_id,
+            global_action=True
+        )
+
+
+
+        successful = 0
+        failed = []
+
+
+
+        # Get registered Defender servers
+
+        conn = db()
+        cur = conn.cursor()
+
+
+        cur.execute(
+            """
+            SELECT server_id
+            FROM servers
+            """
+        )
+
+
+        servers = cur.fetchall()
+
+
+        conn.close()
+
+
+
+        for (server_id,) in servers:
+
+
+            guild = client.get_guild(
+                int(server_id)
+            )
+
+
+            if guild is None:
+
+                failed.append(
+                    f"Unknown server ({server_id})"
+                )
+
+                continue
+
+
+
+            try:
+
+                await guild.ban(
+                    discord.Object(
+                        id=int(self.user_id)
+                    ),
+                    reason=f"Defender Global Ban: {self.reason}"
+                )
+
+
+                successful += 1
+
+
+
+            except Exception as e:
+
+                failed.append(
+                    f"{guild.name}: {e}"
+                )
+
+
+
+        embed = discord.Embed(
+            title="✅ Global Ban Complete",
+            colour=discord.Colour.red()
+        )
+
+
+        embed.add_field(
+            name="User",
+            value=f"<@{self.user_id}>",
+            inline=False
+        )
+
+
+        embed.add_field(
+            name="Reason",
+            value=self.reason,
+            inline=False
+        )
+
+
+        embed.add_field(
+            name="Case ID",
+            value=f"#{case_id}",
+            inline=True
+        )
+
+
+        embed.add_field(
+            name="Successful Servers",
+            value=str(successful),
+            inline=True
+        )
+
+
+        embed.add_field(
+            name="Failed Servers",
+            value=(
+                "\n".join(failed)
+                if failed
+                else "None"
+            ),
+            inline=False
+        )
+
+
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=None
+        )
+
+
+
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+        emoji="❌"
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+
+        if interaction.user.id != self.original_user.id:
+
+            await interaction.response.send_message(
+                "❌ Only the moderator who started this ban can cancel it.",
+                ephemeral=True
+            )
+
+            return
+
+
+
+        embed = discord.Embed(
+            title="❌ Global Ban Cancelled",
+            colour=discord.Colour.greyple()
+        )
+
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=None
+        )
+
+# ================= CASE VIEWER =================
+
+@client.tree.command(
+    name="case",
+    description="View a Defender moderation case"
+)
+@app_commands.describe(
+    case_id="Case ID"
+)
+async def case(
+    interaction: discord.Interaction,
+    case_id: int
+):
+
+
+    if not can_mod(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+
+    cur.execute(
+        """
+        SELECT
+        user_id,
+        action,
+        reason,
+        moderator,
+        guild,
+        date
+
+        FROM logs
+
+        WHERE id=?
+
+        """,
+
+        (case_id,)
+    )
+
+
+    result = cur.fetchone()
+
+
+
+    if not result:
+
+        conn.close()
+
+        await interaction.response.send_message(
+            "❌ Case not found."
+        )
+
+        return
+
+
+
+    user_id, action, reason, moderator, guild, date = result
+
+
+
+    cur.execute(
+        """
+        SELECT
+        author,
+        note,
+        date
+
+        FROM case_notes
+
+        WHERE case_id=?
+
+        ORDER BY id ASC
+
+        """,
+
+        (case_id,)
+    )
+
+
+    notes = cur.fetchall()
+
+
+    conn.close()
+
+
+
+    embed = discord.Embed(
+
+        title=f"📁 Defender Case #{case_id}",
+
+        colour=discord.Colour.orange()
+
+    )
+
+
+
+    embed.add_field(
+
+        name="Action",
+
+        value=action,
+
+        inline=True
+
+    )
+
+
+    embed.add_field(
+
+        name="User",
+
+        value=f"<@{user_id}>\n`{user_id}`",
+
+        inline=False
+
+    )
+
+
+    embed.add_field(
+
+        name="Moderator",
+
+        value=f"<@{moderator}>",
+
+        inline=True
+
+    )
+
+
+    embed.add_field(
+
+        name="Server",
+
+        value=guild,
+
+        inline=True
+
+    )
+
+
+    embed.add_field(
+
+        name="Reason",
+
+        value=reason,
+
+        inline=False
+
+    )
+
+
+    embed.add_field(
+
+        name="Date",
+
+        value=date,
+
+        inline=False
+
+    )
+
+
+
+    if notes:
+
+        embed.add_field(
+
+            name="📝 Notes",
+
+            value="\n\n".join(
+
+                [
+
+                    f"<@{author}>: {note}\n`{date}`"
+
+                    for author, note, date in notes
+
+                ]
+
+            ),
+
+            inline=False
+
+        )
+
+
+    else:
+
+        embed.add_field(
+
+            name="📝 Notes",
+
+            value="No notes.",
+
+            inline=False
+
+        )
+
+
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+# ================= CASE NOTES =================
+
+
+@client.tree.command(
+    name="case_note",
+    description="Add a note to a Defender case"
+)
+@app_commands.describe(
+    case_id="Case ID",
+    note="Note to add"
+)
+async def case_note(
+    interaction: discord.Interaction,
+    case_id: int,
+    note: str
+):
+
+
+    if not can_mod(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+
+    # Check case exists
+
+    cur.execute(
+        """
+        SELECT id
+
+        FROM logs
+
+        WHERE id=?
+
+        """,
+
+        (case_id,)
+    )
+
+
+    result = cur.fetchone()
+
+
+
+    if not result:
+
+        conn.close()
+
+        await interaction.response.send_message(
+            "❌ Case does not exist."
+        )
+
+        return
+
+
+
+    cur.execute(
+        """
+        INSERT INTO case_notes
+
+        (
+        case_id,
+        author,
+        note,
+        date
+        )
+
+        VALUES (?,?,?,?)
+
+        """,
+
+        (
+
+            str(case_id),
+
+            str(interaction.user.id),
+
+            note,
+
+            datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+        )
+
+    )
+
+
+
+    conn.commit()
+
+    conn.close()
+
+
+
+    await interaction.response.send_message(
+
+        f"✅ Added note to Case #{case_id}"
+
+    )
+
+    
+# ================= GLOBAL BANS =================
+
+
+@client.tree.command(
+    name="gban",
+    description="Globally ban a user"
+)
+@app_commands.describe(
+    user_id="Discord ID",
+    reason="Reason"
+)
+async def gban(
+    interaction: discord.Interaction,
+    user_id: str,
+    reason: str
+):
+
+    # Hub server only
+    if interaction.guild is None or interaction.guild.id != HUB_SERVER_ID:
+
+        await interaction.response.send_message(
+            "❌ Global bans can only be issued from the Main 416 Server.",
+            ephemeral=True
+        )
+
+        return
+
+
+    # Permission check
+    if not can_admin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission.",
+            ephemeral=True
+        )
+
+        return
+
+
+    # Protect Defender staff / owners / admins
+    allowed, message = ban_protection(
+        interaction.guild,
+        user_id
+    )
+
+    if not allowed:
+
+        await interaction.response.send_message(
+            f"❌ Cannot ban this user.\n{message}",
+            ephemeral=True
+        )
+
+        return
+
+
+    conn = db()
+    cur = conn.cursor()
+
+    # Already globally banned?
+    cur.execute(
+        """
+        SELECT reason, date
+        FROM global_bans
+        WHERE user_id=?
+        """,
+        (user_id,)
+    )
+
+    existing = cur.fetchone()
+
+    if existing:
+
+        conn.close()
+
+        await interaction.response.send_message(
+            f"❌ This user is already globally banned.\n\n"
+            f"**Reason:** {existing[0]}\n"
+            f"**Date:** {existing[1]}",
+            ephemeral=True
+        )
+
+        return
+
+
+    # Count Defender servers
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM servers
+        """
+    )
+
+    server_count = cur.fetchone()[0]
+
+    conn.close()
+
+    embed = discord.Embed(
+        title="⚠ Confirm Global Ban",
+        colour=discord.Colour.orange()
+    )
+
+    embed.add_field(
+        name="User",
+        value=f"<@{user_id}>\n`{user_id}`",
+        inline=False
+    )
+
+    embed.add_field(
+        name="Reason",
+        value=reason,
+        inline=False
+    )
+
+    embed.add_field(
+        name="Servers affected",
+        value=str(server_count),
+        inline=False
+    )
+
+    embed.set_footer(
+        text="Only the moderator who started this action can confirm it."
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=ConfirmGlobalBan(
+            interaction.user,
+            user_id,
+            reason
+        )
+    )
+
+
+# ================= GLOBAL UNBANS =================
+
+
+@client.tree.command(
+    name="gunban",
+    description="Remove a global ban"
+)
+@app_commands.describe(
+    user_id="Discord User ID"
+)
+async def gunban(
+    interaction: discord.Interaction,
+    user_id: str
+):
+
+    # Hub server only
+    if interaction.guild is None or interaction.guild.id != HUB_SERVER_ID:
+
+        await interaction.response.send_message(
+            "❌ Global unbans can only be issued from the Main 416 Server.",
+            ephemeral=True
+        )
+
+        return
+
+
+    # Permission check
+    if not can_admin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission.",
+            ephemeral=True
+        )
+
+        return
+
+
+    await interaction.response.defer()
+
+
+    conn = db()
+    cur = conn.cursor()
+
+    # Is the user globally banned?
+    cur.execute(
+        """
+        SELECT reason
+        FROM global_bans
+        WHERE user_id=?
+        """,
+        (user_id,)
+    )
+
+    result = cur.fetchone()
+
+    if not result:
+
+        conn.close()
+
+        await interaction.followup.send(
+            "❌ This user is not globally banned."
+        )
+
+        return
+
+
+    # Remove from database
+    cur.execute(
+        """
+        DELETE FROM global_bans
+        WHERE user_id=?
+        """,
+        (user_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+    await add_log(
+        interaction.guild,
+        user_id,
+        "GLOBAL UNBAN",
+        "Removed global ban",
+        interaction.user.id
+    )
+
+
+    successful = 0
+    failed = []
+
+
+    for guild in client.guilds:
+
+        try:
+
+            await guild.unban(
+                discord.Object(id=int(user_id)),
+                reason="Defender Global Unban"
+            )
+
+            successful += 1
+
+        except discord.NotFound:
+            # User wasn't banned here
+            pass
+
+        except Exception as e:
+
+            failed.append(guild.name)
+
+            print(
+                f"Gunban failed in {guild.name}: {e}"
+            )
+
+
+    await interaction.followup.send(
+
+        f"✅ **Global unban complete**\n\n"
+
+        f"🌐 **Successful servers:** {successful}\n"
+
+        f"❌ **Failed servers:** "
+        f"{', '.join(failed) if failed else 'None'}"
+
+    )
+
+# ================= TEST MODERATION DM =================
+
+@client.tree.command(
+    name="testdm",
+    description="Preview Defender moderation DMs"
+)
+@app_commands.describe(
+    action="Which moderation notice to preview"
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Kick", value="Kick"),
+        app_commands.Choice(name="Ban", value="Ban"),
+        app_commands.Choice(name="Global Ban", value="Global Ban")
+    ]
+)
+async def testdm(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str]
+):
+
+    # Owner only
+    if interaction.user.id != OWNER_ID:
+
+        await interaction.response.send_message(
+            "❌ No permission.",
+            ephemeral=True
+        )
+
+        return
+
+
+    await send_mod_dm(
+        user_id=interaction.user.id,
+        action=action.value,
+        reason="This is a test moderation notice.",
+        case_id=9999,
+        guild=interaction.guild,
+        global_action=(action.value == "Global Ban")
+    )
+
+
+    await interaction.response.send_message(
+        "✅ Test moderation DM sent.",
+        ephemeral=True
+    )
+    
+# ================= GLOBAL BAN LIST =================
+
+
+@client.tree.command(
+    name="gbanlist",
+    description="View global bans"
+)
+async def gbanlist(interaction):
+
+    print(f"Permission: {get_permission(interaction.user)}")
+    print(f"can_admin: {can_admin(interaction.user)}")
+
+    if not can_admin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT user_id, reason, date
+        FROM global_bans
+        """
+    )
+
+    bans = cur.fetchall()
+
+    conn.close()
+
+    if not bans:
+
+        await interaction.response.send_message(
+            "No global bans."
+        )
+
+        return
+
+    embed = discord.Embed(
+        title="🌐 Defender Global Bans",
+        colour=discord.Colour.red()
+    )
+
+    embed.description = "\n\n".join(
+        [
+            f"👤 <@{uid}>\n"
+            f"Reason: {reason}\n"
+            f"Date: {date}"
+            for uid, reason, date in bans
+        ]
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
+
+
+# ================= BAN SYNC =================
+
+
+
+@client.tree.command(
+    name="syncbans",
+    description="Apply all Defender global bans to this server"
+)
+async def syncbans(interaction):
+
+    if not can_admin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+
+    cur.execute(
+        """
+        SELECT user_id, reason
+        FROM global_bans
+        """
+    )
+
+
+    bans = cur.fetchall()
+
+
+    conn.close()
+
+
+
+    await interaction.response.send_message(
+        f"⏳ Syncing {len(bans)} global bans..."
+    )
+
+
+
+    successful = 0
+    failed = []
+
+
+
+    for user_id, reason in bans:
+
+
+        allowed, message = ban_protection(
+            interaction.guild,
+            user_id
+        )
+
+
+        if not allowed:
+
+            failed.append(
+                f"{user_id} ({message})"
+            )
+
+            continue
+
+
+
+        try:
+
+            await interaction.guild.ban(
+
+                discord.Object(id=int(user_id)),
+
+                reason=f"Defender Global Ban: {reason}"
+
+            )
+
+            successful += 1
+
+
+
+        except:
+
+            failed.append(
+                user_id
+            )
+
+
+
+    await interaction.followup.send(
+
+        f"✅ Sync complete\n\n"
+
+        f"**Banned:** {successful}\n"
+
+        f"**Failed:** {', '.join(failed) if failed else 'None'}"
+
+    )
+
+# ================= KICK =================
+
+
+@client.tree.command(
+    name="kick",
+    description="Kick a user from this server"
+)
+@app_commands.describe(
+    user_id="Discord User ID",
+    reason="Reason for kick"
+)
+async def kick(
+    interaction: discord.Interaction,
+    user_id: str,
+    reason: str
+):
+
+    if not can_mod(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+
+    # Protect staff / important users
+    allowed, message = ban_protection(
+        interaction.guild,
+        user_id
+    )
+
+
+    if not allowed:
+
+        await interaction.response.send_message(
+            f"❌ Cannot kick this user.\n{message}"
+        )
+
+        return
+
+
+    try:
+
+        member = interaction.guild.get_member(
+            int(user_id)
+        )
+
+
+        if member is None:
+
+            await interaction.response.send_message(
+                "❌ User must be in this server to be kicked."
+            )
+
+            return
+
+
+    except Exception as e:
+
+        await interaction.response.send_message(
+            f"❌ Failed to find user.\n`{e}`"
+        )
+
+        return
+
+
+
+    # Create case log first
+    case_id = await add_log(
+        interaction.guild,
+        user_id,
+        "KICK",
+        reason,
+        interaction.user.id
+    )
+
+
+    # Send moderation DM
+    await send_mod_dm(
+        user_id,
+        "Kick",
+        reason,
+        case_id,
+        interaction.guild
+    )
+
+
+
+    try:
+
+        await member.kick(
+            reason=reason
+        )
+
+
+    except Exception as e:
+
+        await interaction.response.send_message(
+            f"❌ Failed to kick user.\n`{e}`"
+        )
+
+        return
+
+
+
+    await interaction.response.send_message(
+        f"✅ User kicked.\nCase ID: #{case_id}"
+    )
+    
+# ================= LOCAL BANS =================
+
+
+@client.tree.command(
+    name="ban",
+    description="Ban a user in this server"
+)
+@app_commands.describe(
+    user_id="Discord User ID",
+    reason="Reason for ban"
+)
+async def ban(
+    interaction,
+    user_id: str,
+    reason: str
+):
+
+    if not can_mod(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+
+    # Check if already banned
+    bans = [
+        entry async for entry in interaction.guild.bans()
+    ]
+
+    if any(entry.user.id == int(user_id) for entry in bans):
+
+        await interaction.response.send_message(
+            "❌ This user is already banned from this server."
+        )
+
+        return
+
+
+    # Staff protection
+    allowed, message = ban_protection(
+        interaction.guild,
+        user_id
+    )
+
+
+    if not allowed:
+
+        await interaction.response.send_message(
+            f"❌ Cannot ban this user.\n{message}"
+        )
+
+        return
+
+
+    try:
+
+        await interaction.guild.ban(
+            discord.Object(id=int(user_id)),
+            reason=reason
+        )
+
+
+    except Exception as e:
+
+        await interaction.response.send_message(
+            f"❌ Failed to ban user.\n`{e}`"
+        )
+
+        return
+
+
+
+    # Create case log
+    case_id = await add_log(
+        interaction.guild,
+        user_id,
+        "LOCAL BAN",
+        reason,
+        interaction.user.id
+    )
+
+
+    # Send moderation DM
+    await send_mod_dm(
+        user_id,
+        "Ban",
+        reason,
+        case_id,
+        interaction.guild
+    )
+
+
+    await interaction.response.send_message(
+        f"✅ User banned.\nCase ID: #{case_id}"
+    )
+
+
+
+@client.tree.command(
+    name="unban",
+    description="Unban a user in this server"
+)
+@app_commands.describe(
+    user_id="Discord User ID"
+)
+async def unban(
+    interaction,
+    user_id: str
+):
+
+    if not can_mod(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ No permission."
+        )
+
+        return
+
+
+    # Check if user is actually banned
+    bans = [entry async for entry in interaction.guild.bans()]
+
+    if not any(entry.user.id == int(user_id) for entry in bans):
+
+        await interaction.response.send_message(
+            "❌ This user is not banned from this server."
+        )
+
+        return
+
+
+    try:
+
+        await interaction.guild.unban(
+            discord.Object(id=int(user_id))
+        )
+
+    except Exception as e:
+
+        await interaction.response.send_message(
+            f"❌ Failed to unban user.\n`{e}`"
+        )
+
+        return
+
+
+    await add_log(
+        interaction.guild,
+        user_id,
+        "LOCAL UNBAN",
+        "Removed local ban",
+        interaction.user.id
+    )
+
+
+    await interaction.response.send_message(
+        "✅ User unbanned."
+    )
+
+
+
+# ================= ADMIN MANAGEMENT =================
+
+
+@client.tree.command(
+    name="add_admin",
+    description="Add Defender permissions"
+)
+@app_commands.describe(
+    level="Permission level",
+    user="User to give permission",
+    role="Role to give permission"
+)
+@app_commands.choices(
+    level=[
+
+        app_commands.Choice(
+            name="Superadmin",
+            value="superadmin"
+        ),
+
+        app_commands.Choice(
+            name="Admin",
+            value="admin"
+        ),
+
+        app_commands.Choice(
+            name="Mod",
+            value="mod"
+        )
+
+    ]
+)
+async def add_admin(
+    interaction,
+    level: app_commands.Choice[str],
+    user: discord.User = None,
+    role: discord.Role = None
+):
+
+    if not can_superadmin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ Superadmin permission required.",
+            ephemeral=True
+        )
+
+        return
+
+
+    if user is None and role is None:
+
+        await interaction.response.send_message(
+            "❌ Select a user or role.",
+            ephemeral=True
+        )
+
+        return
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+    cur.execute(
+        """
+        INSERT INTO admins
+        (
+        user_id,
+        role_id,
+        permission
+        )
+        VALUES (?,?,?)
+        """,
+        (
+            str(user.id) if user else None,
+            str(role.id) if role else None,
+            level.value
+        )
+    )
+
+
+    conn.commit()
+    conn.close()
+
+
+    target = user.mention if user else role.mention
+
+
+    await add_log(
+        interaction.guild,
+        user.id if user else role.id,
+        "ADMIN GRANTED",
+        f"Granted {level.value} permission",
+        interaction.user.id
+    )
+
+
+    await interaction.response.send_message(
+    f"✅ {target} is now **{level.name}**.",
+    silent=True
+            )
+    
+
+
+
+
+
+@client.tree.command(
+    name="remove_admin",
+    description="Remove Defender permissions"
+)
+@app_commands.describe(
+    user_id="User ID",
+    role_id="Role ID"
+)
+async def remove_admin(
+    interaction,
+    user_id: str = None,
+    role_id: str = None
+):
+
+    if not can_superadmin(interaction.user):
+
+        await interaction.response.send_message(
+            "❌ Superadmin+ permission required.",
+            ephemeral=True
+        )
+
+        return
+
+
+    if user_id is None and role_id is None:
+
+        await interaction.response.send_message(
+            "❌ Provide a user ID or role ID.",
+            ephemeral=True
+        )
+
+        return
+
+
+    conn = db()
+    cur = conn.cursor()
+
+
+    cur.execute(
+        """
+        DELETE FROM admins
+        WHERE user_id=? OR role_id=?
+        """,
+        (
+            user_id,
+            role_id
+        )
+    )
+
+
+    conn.commit()
+    conn.close()
+
+
+    await add_log(
+        interaction.guild,
+        user_id if user_id else role_id,
+        "ADMIN REMOVED",
+        "Defender permission removed",
+        interaction.user.id
+    )
+
+
+    await interaction.response.send_message(
+        "✅ Permission removed."
+    )
+
+
+# ================= LIST ADMINS =================
+
+PERMISSION_DISPLAY = {
+    "manager": "🛠 Manager",
+    "superadmin": "<:def_superadmin:1530946087404179637> Superadmin",
+    "admin": "<:def_admin:1530945491183992973> Admin",
+    "mod": "<:def_mod:1530945434351177959> Moderator"
+}
+
+
+@client.tree.command(
+    name="list_admins",
+    description="View Defender staff"
+)
+async def list_admins(interaction: discord.Interaction):
+
+    conn = db()
+    cur = conn.cursor()
+
+
+    cur.execute(
+        """
+        SELECT user_id, role_id, permission
+        FROM admins
+        ORDER BY
+            CASE permission
+                WHEN 'manager' THEN 4
+                WHEN 'superadmin' THEN 3
+                WHEN 'admin' THEN 2
+                WHEN 'mod' THEN 1
+                ELSE 0
+            END DESC
+        """
+    )
+
+
+    admins = cur.fetchall()
+
+    conn.close()
+
+
+
+    embed = discord.Embed(
+        title="🛡️ Defender Staff Directory",
+        description="Current Defender permission holders",
+        colour=discord.Colour.orange()
+    )
+
+
+
+    sections = {
+        "superadmin": [],
+        "admin": [],
+        "mod": [],
+        "manager": []
+    }
+
+
+
+    # Permanent Manager
+    sections["manager"].append(
+        f"<:prolock:1530711020534763731> <@{OWNER_ID}>"
+    )
+
+
+
+    # Database entries
+    for user_id, role_id, permission in admins:
+
+        target = None
+
+
+        if user_id:
+
+            target = f"👤 <@{user_id}>"
+
+
+        elif role_id:
+
+            target = f"📄 <@&{role_id}>"
+
+
+        if permission in sections and target:
+
+            sections[permission].append(target)
+
+
+
+    # Build staff directory with spacing between ranks
+    staff_text = ""
+
+
+    for index, permission in enumerate([
+        "superadmin",
+        "admin",
+        "mod"
+    ]):
+
+        staff_text += (
+            f"{PERMISSION_DISPLAY[permission]}\n"
+        )
+
+
+        if sections[permission]:
+
+            staff_text += (
+                "\n".join(sections[permission])
+            )
+
+        else:
+
+            staff_text += "*None*"
+
+
+
+        # Space before next rank
+        if index < 2:
+
+            staff_text += "\n\n"
+
+
+
+    # Divider between staff and manager
+
+    staff_text += (
+        "\n\n━━━━━━━━━━━━━━\n\n"
+    )
+
+
+
+    # Defender Manager
+
+    staff_text += (
+        f"{PERMISSION_DISPLAY['manager']}\n"
+    )
+
+
+    if sections["manager"]:
+
+        staff_text += (
+            "\n".join(sections["manager"])
+        )
+
+    else:
+
+        staff_text += "*None*"
+
+
+
+    embed.add_field(
+
+        name="\u200b",
+
+        value=staff_text,
+
+        inline=False
+
+    )
+
+    embed.set_footer(
+        text=f"🛡️ Defender {VERSION}"
+    )
+
+    await interaction.response.send_message(
+
+        embed=embed
+
+    )
+# ================= START =================
+
+
+setup_database()
+
+client.run(TOKEN)
